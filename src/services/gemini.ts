@@ -60,6 +60,39 @@ export interface FrameBotContext {
   ottList?: string;
 }
 
+/** Raw contents-based SSE streamer (used by the agent loop after tool rounds). */
+export async function* streamGeminiContents(
+  systemPrompt: string,
+  contents: Array<{ role: string; parts: any[] }>
+): AsyncGenerator<string> {
+  const response = await axios.post(
+    `${GEMINI_URL}?key=${API_KEY}&alt=sse`,
+    {
+      system_instruction: { parts: [{ text: systemPrompt }] },
+      contents,
+      generationConfig: { temperature: 0.8, maxOutputTokens: 1024 }
+    },
+    { responseType: 'stream' }
+  );
+
+  let buffer = '';
+  for await (const chunk of response.data) {
+    buffer += chunk.toString();
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        try {
+          const json = JSON.parse(line.slice(6));
+          const text = json?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (text) yield text;
+        } catch {}
+      }
+    }
+  }
+}
+
 export async function* streamGeminiResponse(
   systemPrompt: string,
   history: Array<{ role: string; content: string }>,
@@ -100,30 +133,5 @@ Want me to save this plan? Say the word and we'll keep building your day — mov
     { role: 'user', parts: [{ text: userMessage }] }
   ];
 
-  const response = await axios.post(
-    `${GEMINI_URL}?key=${API_KEY}&alt=sse`,
-    {
-      system_instruction: { parts: [{ text: systemPrompt }] },
-      contents,
-      generationConfig: { temperature: 0.8, maxOutputTokens: 1024 }
-    },
-    { responseType: 'stream' }
-  );
-
-  let buffer = '';
-  for await (const chunk of response.data) {
-    buffer += chunk.toString();
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-
-    for (const line of lines) {
-      if (line.startsWith('data: ')) {
-        try {
-          const json = JSON.parse(line.slice(6));
-          const text = json?.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (text) yield text;
-        } catch {}
-      }
-    }
-  }
+  yield* streamGeminiContents(systemPrompt, contents);
 }

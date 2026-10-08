@@ -1,15 +1,28 @@
 import { Router, Request, Response } from 'express';
-import { buildSystemPrompt, streamGeminiResponse } from '../services/gemini';
-import { getTrendingMovies } from '../services/tmdb';
-import { getNearbyRestaurants } from '../services/places';
+import {
+  runAgentTurn,
+  newSessionId,
+  getPlan,
+  removePlanItem,
+  clearPlan,
+} from '../services/agent';
 
 export const framebotRouter = Router();
 
-// POST /framebot/chat  (SSE streaming)
+// POST /framebot/chat  (SSE streaming: {"text"} chunks, {"plan"} updates, {"done":true,"sessionId"})
 framebotRouter.post('/chat', async (req: Request, res: Response) => {
-  const { message, history = [], user = {}, city = 'hyderabad', language = 'English' } = req.body;
+  const {
+    message,
+    history = [],
+    user = {},
+    city = 'hyderabad',
+    language = 'English',
+    sessionId: clientSessionId,
+  } = req.body;
 
   if (!message) return res.status(400).json({ error: 'Message required' });
+
+  const sessionId = clientSessionId || newSessionId();
 
   // Set SSE headers
   res.setHeader('Content-Type', 'text/event-stream');
@@ -18,30 +31,35 @@ framebotRouter.post('/chat', async (req: Request, res: Response) => {
   res.flushHeaders();
 
   try {
-    // Fetch live context data
-    const [moviesData, restaurantsData] = await Promise.all([
-      getTrendingMovies(1),
-      getNearbyRestaurants(city),
-    ]);
-
-    const systemPrompt = buildSystemPrompt(user, moviesData.results, restaurantsData.results, city, language);
-
-    // Context for the no-API-key mock fallback so it stays data-driven
-    const context = {
-      topMovie: moviesData.results?.[0]?.title,
-      topRestaurant: restaurantsData.results?.[0]?.name,
-      ottList: user?.ott_subscriptions?.join(', '),
-    };
-
-    // Stream the response
-    for await (const chunk of streamGeminiResponse(systemPrompt, history, message, context)) {
-      res.write(`data: ${JSON.stringify({ text: chunk })}\n\n`);
+    for await (const event of runAgentTurn({ message, history, user, city, language, sessionId })) {
+      if (event.kind === 'text') {
+        res.write(`data: ${JSON.stringify({ text: event.text })}\n\n`);
+      } else {
+        res.write(`data: ${JSON.stringify({ plan: { items: event.plan } })}\n\n`);
+      }
     }
 
-    res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+    res.write(`data: ${JSON.stringify({ done: true, sessionId })}\n\n`);
     res.end();
   } catch (err: any) {
     res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
     res.end();
   }
+});
+
+// GET /plans/:sessionId — read the current day plan
+framebotRouter.get('/plans/:sessionId', (req: Request, res: Response) => {
+  res.json({ sessionId: req.params.sessionId, items: getPlan(String(req.params.sessionId)) });
+});
+
+// DELETE /plans/:sessionId/items/:itemId — remove one item
+framebotRouter.delete('/plans/:sessionId/items/:itemId', (req: Request, res: Response) => {
+  const items = removePlanItem(String(req.params.sessionId), String(req.params.itemId));
+  if (!items) return res.status(404).json({ error: 'Plan or item not found' });
+  res.json({ sessionId: req.params.sessionId, items });
+});
+
+// POST /plans/:sessionId/clear — empty the day plan
+framebotRouter.post('/plans/:sessionId/clear', (req: Request, res: Response) => {
+  res.json({ sessionId: req.params.sessionId, items: clearPlan(String(req.params.sessionId)) });
 });

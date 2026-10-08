@@ -115,3 +115,108 @@ describe('Freekend API', () => {
     assert.equal(body.error, 'Route not found');
   });
 });
+
+describe('Freekend agent mode', () => {
+  let server: Server;
+  let base: string;
+
+  async function postChatSSE(body: any) {
+    const res = await fetch(`${base}/framebot/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    assert.equal(res.status, 200);
+    const raw = await res.text();
+    const out = {
+      text: '',
+      plans: [] as any[],
+      done: false,
+      sessionId: null as string | null,
+      errors: [] as string[],
+    };
+    for (const line of raw.split('\n')) {
+      const t = line.trim();
+      if (!t.startsWith('data:')) continue;
+      const json: any = JSON.parse(t.slice(5).trim());
+      if (json.text) out.text += json.text;
+      if (json.plan) out.plans.push(json.plan);
+      if (json.done) {
+        out.done = true;
+        out.sessionId = json.sessionId || null;
+      }
+      if (json.error) out.errors.push(json.error);
+    }
+    return out;
+  }
+
+  before(async () => {
+    await new Promise<void>((resolve) => {
+      server = app.listen(0, () => resolve());
+    });
+    const addr = server.address();
+    const port = typeof addr === 'object' && addr ? addr.port : 0;
+    base = `http://127.0.0.1:${port}`;
+  });
+
+  after(async () => {
+    await new Promise<void>((resolve, reject) =>
+      server.close((e) => (e ? reject(e) : resolve())),
+    );
+  });
+
+  it('mock agent: biryani search suggests real restaurants, agreement builds the plan', async () => {
+    const sid = 'agent-test-biryani';
+    const first = await postChatSSE({ message: 'find me biryani in hyderabad', city: 'hyderabad', sessionId: sid });
+    assert.equal(first.errors.length, 0);
+    assert.ok(first.done);
+    assert.equal(first.sessionId, sid);
+    assert.ok(first.text.includes('Paradise Biryani'), 'reply names a real restaurant');
+    assert.equal(first.plans.length, 0, 'no plan change before agreement');
+
+    const second = await postChatSSE({ message: 'yes, book it', city: 'hyderabad', sessionId: sid });
+    assert.ok(second.done);
+    assert.ok(second.plans.length > 0, 'agreement yields a plan event');
+    const items = second.plans[second.plans.length - 1].items;
+    assert.ok(items.some((i: any) => i.title === 'Paradise Biryani'), 'plan contains the agreed restaurant');
+    for (const item of items) {
+      assert.equal(item.type, 'restaurant');
+      assert.ok(typeof item.startsAt === 'string', 'startsAt present');
+      const t = Date.parse(item.startsAt);
+      assert.ok(!isNaN(t), 'startsAt is valid ISO');
+      assert.ok(t > Date.now(), 'startsAt is in the future');
+    }
+  });
+
+  it('mock agent: server generates a sessionId when the client omits it', async () => {
+    const out = await postChatSSE({ message: 'suggest a movie', city: 'hyderabad' });
+    assert.ok(out.done);
+    assert.ok(out.sessionId && out.sessionId.length > 8, 'server-issued sessionId');
+    assert.ok(out.text.includes('RRR') || out.text.includes('Pushpa'), 'movie suggestions stream');
+  });
+
+  it('plan REST: GET returns items, DELETE removes one, POST clear empties', async () => {
+    const sid = 'agent-test-rest';
+    await postChatSSE({ message: 'any good events in hyderabad?', city: 'hyderabad', sessionId: sid });
+    await postChatSSE({ message: 'yes', city: 'hyderabad', sessionId: sid });
+
+    const got: any = await (await fetch(`${base}/framebot/plans/${sid}`)).json();
+    assert.equal(got.sessionId, sid);
+    assert.ok(got.items.length > 0, 'plan has items after agreement');
+
+    const firstId = got.items[0].id;
+    const delRes = await fetch(`${base}/framebot/plans/${sid}/items/${firstId}`, { method: 'DELETE' });
+    assert.equal(delRes.status, 200);
+    const delBody: any = await delRes.json();
+    assert.equal(delBody.items.length, got.items.length - 1);
+    assert.ok(!delBody.items.some((i: any) => i.id === firstId));
+
+    const badDel = await fetch(`${base}/framebot/plans/${sid}/items/nope`, { method: 'DELETE' });
+    assert.equal(badDel.status, 404);
+
+    const clearRes = await fetch(`${base}/framebot/plans/${sid}/clear`, { method: 'POST' });
+    assert.equal(clearRes.status, 200);
+    const clearBody: any = await clearRes.json();
+    assert.deepEqual(clearBody.items, []);
+  });
+});
