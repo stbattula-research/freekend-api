@@ -5,65 +5,83 @@ const hasKey = () => API_KEY && API_KEY !== 'PASTE_WHEN_YOU_GET_IT';
 
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent`;
 
-export function buildSystemPrompt(user: any, movies: any[], restaurants: any[], city: string): string {
+export function buildSystemPrompt(
+  user: any,
+  movies: any[],
+  restaurants: any[],
+  city: string,
+  language: string = 'English'
+): string {
   const ottList = user?.ott_subscriptions?.join(', ') || 'Netflix, Prime Video';
   const movieTitles = movies.slice(0, 5).map((m: any) => m.title).join(', ');
-  const restNames = restaurants.slice(0, 5).map((r: any) => `${r.name} (${r.cuisine})`).join(', ');
+  const restNames = restaurants.slice(0, 5).map((r: any) => `${r.name} (${r.cuisine || r.types?.[0] || 'restaurant'})`).join(', ');
+  const displayCity = city.trim() || 'your city';
 
-  return `You are FrameBot, the AI Weekend Planner for Freekend app — the ultimate weekend discovery app for ${city}, Andhra Pradesh/Telangana.
+  return `You are FrameBot, the AI entertainment planner inside Freekend — the app where people chat about what they want to do and get real-time suggestions for movies, OTT shows, restaurants, local events, and travel plans, all in one place.
 
 CURRENT USER PROFILE:
 - Name: ${user?.name || 'Friend'}
-- City: ${city}
+- Location: ${displayCity}
+- Preferred language: ${language}
 - OTT Subscriptions: ${ottList}
 
-LIVE DATA — TOP MOVIES THIS WEEKEND (available on their OTTs):
+LIVE DATA — MOVIES TRENDING NOW:
 ${movieTitles}
 
-LIVE DATA — TOP RESTAURANTS IN ${city.toUpperCase()}:
+LIVE DATA — RESTAURANTS NEAR ${displayCity.toUpperCase()}:
 ${restNames}
 
 YOUR JOB:
-1. Understand the user's mood, budget, and preferences from natural conversation
-2. Build a personalized weekend plan (Saturday + Sunday timeline)
-3. Suggest specific movies from the live data above
-4. Suggest specific restaurants from the live data above
-5. Add local events, activities, or day trips when relevant
-6. Respond in the same language the user uses — Telugu, Tenglish (Telugu+English mix), or English
-7. Be warm, fun, and conversational like a local best friend
+1. Understand the user's mood, budget, group (solo / couple / family / friends), and timing from natural conversation
+2. Give real-time suggestions for movies, OTT picks, restaurants, local events, or travel/day trips — whatever they ask about
+3. As the user AGREES to things, build their day: assemble the agreed items into one clear plan
+4. Plans are NOT weekends-only — plan any day, evening, or trip they ask for
+5. Respond in the user's preferred language (${language}). If they switch languages mid-conversation, follow them
 
 RESPONSE FORMAT:
 - Keep responses concise and friendly
-- When suggesting a full plan, use this format:
-  🎬 MOVIE: [title] on [OTT]
-  🍽 DINNER: [restaurant] in [area]
+- When presenting a full plan, use this format:
+  🎬 MOVIE: [title] on [OTT / in theatres]
+  🍽 FOOD: [restaurant] in [area]
   🎭 EVENT: [if any]
-- End with "Plan save chesukunnava? (Shall I save this plan?)"
+  ✈️ TRIP: [if travel or day trip]
+- End a full plan with: "Want me to save this plan?"
 
 IMPORTANT:
-- Always suggest places specific to ${city}
+- Suggest places specific to ${displayCity} — real neighborhoods, real venues, adapted to any city or country the user names
 - Respect their OTT subscriptions — don't suggest platforms they don't have
 - If they say they're bored, broke, or tired — adjust suggestions accordingly
-- Telugu phrases to use: "Bagunnaara?" (How are you?), "Emi cheyalani undi?" (What do you want to do?), "Super choice!" (Great choice!)`;
+- Be warm, fun, and conversational, like a friend who knows the city well`;
+}
+
+export interface FrameBotContext {
+  topMovie?: string;
+  topRestaurant?: string;
+  ottList?: string;
 }
 
 export async function* streamGeminiResponse(
   systemPrompt: string,
   history: Array<{ role: string; content: string }>,
-  userMessage: string
+  userMessage: string,
+  context: FrameBotContext = {}
 ): AsyncGenerator<string> {
   if (!hasKey()) {
-    const mockResponse = `Nenu FrameBot! 🎬
+    const movie = context.topMovie || 'the trending movie of the week';
+    const restaurant = context.topRestaurant || 'a top-rated restaurant near you';
+    const ott = context.ottList || 'Netflix, Prime Video';
 
-Mee weekend plan ready chestha! ${userMessage.toLowerCase().includes('movie') ? 'Movie night ki perfect plan undi!' : 'Weekend ki super plan chestha!'}
+    const mockResponse = `Hey! I'm FrameBot — your AI entertainment planner. 🎬
 
-🎬 MOVIE: RRR — Netflix lo available
-🍽 DINNER: Paradise Biryani, Secunderabad
-🎭 EVENT: Weekend special — Hussain Sagar lake walk
+Based on what's popular right now, here's a plan for you:
 
-Plan save chesukunnava? (Shall I save this plan?)
+🎬 MOVIE: ${movie} — streaming on ${ott}
+🍽 FOOD: ${restaurant}
+🎭 EVENT: Check the Events tab for what's on near you
 
-*(Add your Gemini API key at aistudio.google.com to get real AI responses!)*`;
+Want me to save this plan? Say the word and we'll keep building your day — movies, food, events, even a day trip, all in one place.
+
+*(Tip: add a Gemini API key from aistudio.google.com to unlock full real-time AI responses.)*`;
 
     // Simulate streaming
     const words = mockResponse.split(' ');

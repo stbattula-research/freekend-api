@@ -7,7 +7,7 @@ export const framebotRouter = Router();
 
 // POST /framebot/chat  (SSE streaming)
 framebotRouter.post('/chat', async (req: Request, res: Response) => {
-  const { message, history = [], user = {}, city = 'hyderabad' } = req.body;
+  const { message, history = [], user = {}, city = 'hyderabad', language = 'English' } = req.body;
 
   if (!message) return res.status(400).json({ error: 'Message required' });
 
@@ -24,10 +24,17 @@ framebotRouter.post('/chat', async (req: Request, res: Response) => {
       getNearbyRestaurants(city),
     ]);
 
-    const systemPrompt = buildSystemPrompt(user, moviesData.results, restaurantsData.results, city);
+    const systemPrompt = buildSystemPrompt(user, moviesData.results, restaurantsData.results, city, language);
+
+    // Context for the no-API-key mock fallback so it stays data-driven
+    const context = {
+      topMovie: moviesData.results?.[0]?.title,
+      topRestaurant: restaurantsData.results?.[0]?.name,
+      ottList: user?.ott_subscriptions?.join(', '),
+    };
 
     // Stream the response
-    for await (const chunk of streamGeminiResponse(systemPrompt, history, message)) {
+    for await (const chunk of streamGeminiResponse(systemPrompt, history, message, context)) {
       res.write(`data: ${JSON.stringify({ text: chunk })}\n\n`);
     }
 
