@@ -9,7 +9,8 @@ import {
 
 export const framebotRouter = Router();
 
-// POST /framebot/chat  (SSE streaming: {"text"} chunks, {"plan"} updates, {"done":true,"sessionId"})
+// POST /framebot/chat  (SSE streaming: {"text"} chunks, {"suggestions"} pick cards,
+// {"plan"} updates, {"done":true,"sessionId"})
 framebotRouter.post('/chat', async (req: Request, res: Response) => {
   const {
     message,
@@ -18,11 +19,21 @@ framebotRouter.post('/chat', async (req: Request, res: Response) => {
     city = 'hyderabad',
     language = 'English',
     sessionId: clientSessionId,
+    lat: latRaw,
+    lng: lngRaw,
   } = req.body;
 
   if (!message) return res.status(400).json({ error: 'Message required' });
 
   const sessionId = clientSessionId || newSessionId();
+
+  const toCoord = (v: any, max: number): number | undefined => {
+    if (v === undefined || v === null || v === '') return undefined;
+    const n = Number(v);
+    return Number.isFinite(n) && Math.abs(n) <= max ? n : undefined;
+  };
+  const lat = toCoord(latRaw, 90);
+  const lng = toCoord(lngRaw, 180);
 
   // Set SSE headers
   res.setHeader('Content-Type', 'text/event-stream');
@@ -31,11 +42,13 @@ framebotRouter.post('/chat', async (req: Request, res: Response) => {
   res.flushHeaders();
 
   try {
-    for await (const event of runAgentTurn({ message, history, user, city, language, sessionId })) {
+    for await (const event of runAgentTurn({ message, history, user, city, language, sessionId, lat, lng })) {
       if (event.kind === 'text') {
         res.write(`data: ${JSON.stringify({ text: event.text })}\n\n`);
-      } else {
+      } else if (event.kind === 'plan') {
         res.write(`data: ${JSON.stringify({ plan: { items: event.plan } })}\n\n`);
+      } else {
+        res.write(`data: ${JSON.stringify({ suggestions: event.suggestions })}\n\n`);
       }
     }
 

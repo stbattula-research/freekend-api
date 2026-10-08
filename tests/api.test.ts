@@ -131,6 +131,7 @@ describe('Freekend agent mode', () => {
     const out = {
       text: '',
       plans: [] as any[],
+      suggestions: [] as any[][],
       done: false,
       sessionId: null as string | null,
       errors: [] as string[],
@@ -141,6 +142,7 @@ describe('Freekend agent mode', () => {
       const json: any = JSON.parse(t.slice(5).trim());
       if (json.text) out.text += json.text;
       if (json.plan) out.plans.push(json.plan);
+      if (json.suggestions) out.suggestions.push(json.suggestions);
       if (json.done) {
         out.done = true;
         out.sessionId = json.sessionId || null;
@@ -148,6 +150,11 @@ describe('Freekend agent mode', () => {
       if (json.error) out.errors.push(json.error);
     }
     return out;
+  }
+
+  async function getPlanItems(sid: string): Promise<any[]> {
+    const body: any = await (await fetch(`${base}/framebot/plans/${sid}`)).json();
+    return body.items;
   }
 
   before(async () => {
@@ -165,27 +172,164 @@ describe('Freekend agent mode', () => {
     );
   });
 
-  it('mock agent: biryani search suggests real restaurants, agreement builds the plan', async () => {
+  it('mock agent: biryani search suggests real restaurants, user picks one', async () => {
     const sid = 'agent-test-biryani';
     const first = await postChatSSE({ message: 'find me biryani in hyderabad', city: 'hyderabad', sessionId: sid });
     assert.equal(first.errors.length, 0);
     assert.ok(first.done);
     assert.equal(first.sessionId, sid);
     assert.ok(first.text.includes('Paradise Biryani'), 'reply names a real restaurant');
-    assert.equal(first.plans.length, 0, 'no plan change before agreement');
+    assert.equal(first.plans.length, 0, 'no plan change before a pick');
+    assert.ok(first.suggestions.length > 0, 'suggestions emitted as pick cards');
+    const cards = first.suggestions[first.suggestions.length - 1];
+    assert.ok(cards.some((c: any) => c.title === 'Paradise Biryani'), 'cards include Paradise Biryani');
 
+    // Bare "yes" with 2+ suggestions must NOT bulk-add — it asks which one.
     const second = await postChatSSE({ message: 'yes, book it', city: 'hyderabad', sessionId: sid });
     assert.ok(second.done);
-    assert.ok(second.plans.length > 0, 'agreement yields a plan event');
-    const items = second.plans[second.plans.length - 1].items;
-    assert.ok(items.some((i: any) => i.title === 'Paradise Biryani'), 'plan contains the agreed restaurant');
-    for (const item of items) {
-      assert.equal(item.type, 'restaurant');
-      assert.ok(typeof item.startsAt === 'string', 'startsAt present');
-      const t = Date.parse(item.startsAt);
-      assert.ok(!isNaN(t), 'startsAt is valid ISO');
-      assert.ok(t > Date.now(), 'startsAt is in the future');
-    }
+    assert.equal(second.plans.length, 0, 'no plan change on ambiguous yes');
+    assert.ok(/which one/i.test(second.text), 'reply asks which suggestion');
+
+    // Explicit pick adds exactly one.
+    const third = await postChatSSE({ message: 'yes, paradise biryani', city: 'hyderabad', sessionId: sid });
+    assert.ok(third.done);
+    assert.ok(third.plans.length > 0, 'pick yields a plan event');
+    const items = third.plans[third.plans.length - 1].items;
+    assert.equal(items.length, 1, 'exactly one item added');
+    assert.equal(items[0].title, 'Paradise Biryani');
+    assert.equal(items[0].type, 'restaurant');
+    const t = Date.parse(items[0].startsAt);
+    assert.ok(!isNaN(t) && t > Date.now(), 'startsAt is a valid future ISO');
+  });
+
+  it('mock agent: bare "yes" with 3 movie suggestions asks which, adds nothing', async () => {
+    const sid = 'agent-test-pickone';
+    await postChatSSE({ message: 'suggest a movie', city: 'hyderabad', sessionId: sid });
+    const out = await postChatSSE({ message: 'yes', city: 'hyderabad', sessionId: sid });
+    assert.ok(out.done);
+    assert.equal(out.plans.length, 0, 'nothing added on ambiguous yes');
+    assert.ok(/which one\?/i.test(out.text), 'reply asks which one');
+    assert.ok(/1\) RRR/.test(out.text) && /2\)/.test(out.text), 'numbered list presented');
+    const items = await getPlanItems(sid);
+    assert.deepEqual(items, [], 'plan stays empty');
+  });
+
+  it('mock agent: "yes, RRR" adds exactly that movie', async () => {
+    const sid = 'agent-test-pickrrr';
+    await postChatSSE({ message: 'suggest a movie', city: 'hyderabad', sessionId: sid });
+    const out = await postChatSSE({ message: 'yes, RRR', city: 'hyderabad', sessionId: sid });
+    assert.ok(out.done);
+    assert.ok(out.plans.length > 0);
+    const items = out.plans[out.plans.length - 1].items;
+    assert.equal(items.length, 1);
+    assert.equal(items[0].title, 'RRR');
+    assert.equal(items[0].type, 'movie');
+  });
+
+  it('mock agent: ordinal pick "the second one" adds that suggestion', async () => {
+    const sid = 'agent-test-ordinal';
+    await postChatSSE({ message: 'suggest a movie', city: 'hyderabad', sessionId: sid });
+    const out = await postChatSSE({ message: 'the second one', city: 'hyderabad', sessionId: sid });
+    const items = out.plans[out.plans.length - 1].items;
+    assert.equal(items.length, 1);
+    assert.equal(items[0].title, 'Pushpa: The Rise');
+  });
+
+  it('mock agent: conflicting add proposes replace; "yes" swaps, double-booking impossible', async () => {
+    const sid = 'agent-test-conflict';
+    await postChatSSE({ message: 'suggest a movie', city: 'hyderabad', sessionId: sid });
+    await postChatSSE({ message: 'yes, RRR', city: 'hyderabad', sessionId: sid });
+    let items = await getPlanItems(sid);
+    assert.equal(items.length, 1);
+
+    // "add Pushpa" clashes with RRR at 7:00 PM — must ask, not add.
+    const clash = await postChatSSE({ message: 'add Pushpa', city: 'hyderabad', sessionId: sid });
+    assert.ok(/already got RRR at 7:00 PM/i.test(clash.text), 'conflict question asked');
+    assert.ok(/replace it with/i.test(clash.text));
+    items = await getPlanItems(sid);
+    assert.equal(items.length, 1, 'still one item after conflict');
+    assert.equal(items[0].title, 'RRR');
+
+    // Confirming performs the replace.
+    const swapped = await postChatSSE({ message: 'yes', city: 'hyderabad', sessionId: sid });
+    assert.ok(/swapped/i.test(swapped.text));
+    items = await getPlanItems(sid);
+    assert.equal(items.length, 1, 'still exactly one item — no double booking');
+    assert.equal(items[0].title, 'Pushpa: The Rise');
+
+    // Declining a replace keeps the plan intact.
+    await postChatSSE({ message: 'suggest a movie', city: 'hyderabad', sessionId: sid });
+    await postChatSSE({ message: 'add RRR', city: 'hyderabad', sessionId: sid });
+    const declined = await postChatSSE({ message: 'no', city: 'hyderabad', sessionId: sid });
+    assert.ok(/keeping your day as is/i.test(declined.text));
+    items = await getPlanItems(sid);
+    assert.equal(items[0].title, 'Pushpa: The Rise');
+  });
+
+  it('mock agent: "remove the movie" removes it conversationally', async () => {
+    const sid = 'agent-test-remove';
+    await postChatSSE({ message: 'suggest a movie', city: 'hyderabad', sessionId: sid });
+    await postChatSSE({ message: 'yes, RRR', city: 'hyderabad', sessionId: sid });
+    assert.equal((await getPlanItems(sid)).length, 1);
+    const out = await postChatSSE({ message: 'remove the movie', city: 'hyderabad', sessionId: sid });
+    assert.ok(/removed/i.test(out.text));
+    assert.deepEqual(await getPlanItems(sid), [], 'plan empty after remove');
+  });
+
+  it('mock agent: "change dinner to Bawarchi" swaps the restaurant, keeps the slot', async () => {
+    const sid = 'agent-test-change';
+    await postChatSSE({ message: 'find me biryani in hyderabad', city: 'hyderabad', sessionId: sid });
+    await postChatSSE({ message: 'yes, paradise biryani', city: 'hyderabad', sessionId: sid });
+    const out = await postChatSSE({ message: 'change dinner to Bawarchi', city: 'hyderabad', sessionId: sid });
+    assert.ok(/swapped/i.test(out.text), 'swap confirmed');
+    const items = await getPlanItems(sid);
+    assert.equal(items.length, 1);
+    assert.equal(items[0].title, 'Bawarchi');
+    assert.equal(items[0].time, '9:00 PM', 'original time slot kept');
+  });
+
+  it('mock agent: "move the movie to 8:30 pm" reschedules with valid future startsAt', async () => {
+    const sid = 'agent-test-resched';
+    await postChatSSE({ message: 'suggest a movie', city: 'hyderabad', sessionId: sid });
+    await postChatSSE({ message: 'yes, RRR', city: 'hyderabad', sessionId: sid });
+    const out = await postChatSSE({ message: 'move the movie to 8:30 pm', city: 'hyderabad', sessionId: sid });
+    assert.ok(/moved/i.test(out.text));
+    const items = await getPlanItems(sid);
+    assert.equal(items.length, 1);
+    assert.equal(items[0].time, '8:30 PM');
+    const t = Date.parse(items[0].startsAt);
+    assert.ok(!isNaN(t) && t > Date.now(), 'startsAt recomputed to a future ISO');
+  });
+
+  it('mock agent: "clear my day" empties the plan', async () => {
+    const sid = 'agent-test-clear';
+    await postChatSSE({ message: 'suggest a movie', city: 'hyderabad', sessionId: sid });
+    await postChatSSE({ message: 'yes, RRR', city: 'hyderabad', sessionId: sid });
+    assert.equal((await getPlanItems(sid)).length, 1);
+    const out = await postChatSSE({ message: 'clear my day', city: 'hyderabad', sessionId: sid });
+    assert.ok(/cleared/i.test(out.text));
+    assert.deepEqual(await getPlanItems(sid), []);
+  });
+
+  it('mock agent: lat/lng sorts restaurants near-first with distances', async () => {
+    const sid = 'agent-test-geo';
+    const out = await postChatSSE({
+      message: 'find me biryani',
+      city: 'hyderabad',
+      sessionId: sid,
+      lat: 17.385,
+      lng: 78.4867,
+    });
+    assert.ok(out.suggestions.length > 0, 'suggestion cards emitted');
+    const cards = out.suggestions[out.suggestions.length - 1];
+    assert.ok(cards.length > 0);
+    const dists = cards.map((c: any) => {
+      const m = /([\d.]+) km away/.exec(c.details || '');
+      assert.ok(m, `details carry a distance: ${c.details}`);
+      return parseFloat(m[1]);
+    });
+    const sorted = [...dists].sort((a, b) => a - b);
+    assert.deepEqual(dists, sorted, 'cards sorted nearest-first');
   });
 
   it('mock agent: server generates a sessionId when the client omits it', async () => {
@@ -198,7 +342,9 @@ describe('Freekend agent mode', () => {
   it('plan REST: GET returns items, DELETE removes one, POST clear empties', async () => {
     const sid = 'agent-test-rest';
     await postChatSSE({ message: 'any good events in hyderabad?', city: 'hyderabad', sessionId: sid });
+    // Bare "yes" with several suggestions asks which — pick one explicitly.
     await postChatSSE({ message: 'yes', city: 'hyderabad', sessionId: sid });
+    await postChatSSE({ message: 'the first one', city: 'hyderabad', sessionId: sid });
 
     const got: any = await (await fetch(`${base}/framebot/plans/${sid}`)).json();
     assert.equal(got.sessionId, sid);

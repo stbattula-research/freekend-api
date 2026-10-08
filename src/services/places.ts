@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { mockDistanceKm } from './geo';
 
 const API_KEY = process.env.GOOGLE_PLACES_API_KEY;
 const hasKey = () => API_KEY && API_KEY !== 'PASTE_WHEN_YOU_GET_IT';
@@ -34,16 +35,23 @@ const MOCK_RESTAURANTS: Record<string, any[]> = {
   ],
 };
 
-export async function getNearbyRestaurants(city: string, cuisine?: string) {
+export async function getNearbyRestaurants(city: string, cuisine?: string, lat?: number, lng?: number) {
   const cityKey = city.toLowerCase();
 
   if (!hasKey()) {
     let results = MOCK_RESTAURANTS[cityKey] || MOCK_RESTAURANTS['hyderabad'];
     if (cuisine) results = results.filter(r => r.cuisine.toLowerCase().includes(cuisine.toLowerCase()));
+    if (lat != null && lng != null) {
+      // Mock mode: attach stable per-venue distances and sort near-first.
+      results = results
+        .map((r) => ({ ...r, distance_km: mockDistanceKm(r.place_id) }))
+        .sort((a, b) => a.distance_km - b.distance_km);
+    }
     return { results, mock: true };
   }
 
-  const coords = CITY_COORDS[cityKey] || CITY_COORDS['hyderabad'];
+  const coords =
+    lat != null && lng != null ? { lat, lng } : CITY_COORDS[cityKey] || CITY_COORDS['hyderabad'];
   const keyword = cuisine ? `${cuisine} restaurant` : 'restaurant';
 
   const res = await axios.get('https://maps.googleapis.com/maps/api/place/nearbysearch/json', {

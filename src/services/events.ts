@@ -1,6 +1,7 @@
 // Shared event data service. Mock events are anchored to the *upcoming*
 // weekend so mock mode never serves stale, in-the-past events.
 // Used by both the /events HTTP route and the FrameBot agent tools.
+import { mockDistanceKm } from './geo';
 
 export interface FreekendEvent {
   id: string;
@@ -12,6 +13,7 @@ export interface FreekendEvent {
   price: string;
   image: null;
   url: string;
+  distance_km?: number;
 }
 
 function upcomingWeekend(): { fri: string; sat: string; sun: string } {
@@ -47,13 +49,19 @@ function mockEvents(): Record<string, FreekendEvent[]> {
   };
 }
 
-export async function getEventsForCity(city: string, category?: string): Promise<FreekendEvent[]> {
+export async function getEventsForCity(city: string, category?: string, lat?: number, lng?: number): Promise<FreekendEvent[]> {
   // Live source goes here when available; mock fallback keeps it working offline.
   const cityKey = city.toLowerCase();
   const all = mockEvents();
   let events = all[cityKey] || all['hyderabad'];
   if (category) {
     events = events.filter((e) => e.category.toLowerCase() === category.toLowerCase());
+  }
+  if (lat != null && lng != null) {
+    // Mock mode: attach stable per-venue distances and sort near-first.
+    events = events
+      .map((e) => ({ ...e, distance_km: mockDistanceKm(e.id) }))
+      .sort((a, b) => (a.distance_km as number) - (b.distance_km as number));
   }
   return events;
 }
